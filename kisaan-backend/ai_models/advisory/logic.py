@@ -55,7 +55,7 @@ def recommend_crop(n, p, k, temp, humidity, ph, rainfall):
         except Exception:
             pass
             
-    return "rice" # Final fallback
+    return "Error: Recommendation models and data unavailable." # Final fallback
 
 def recommend_fertilizer(crop_name, n, p, k):
     import pandas as pd
