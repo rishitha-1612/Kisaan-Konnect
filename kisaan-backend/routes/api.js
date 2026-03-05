@@ -3,25 +3,10 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const db = require('../db');
-const { GoogleGenAI } = require('@google/genai');
 const fs = require('fs');
 require('dotenv').config();
 
 const router = express.Router();
-
-// Initialize Gemini Client safely
-let ai = null;
-
-if (process.env.GEMINI_API_KEY) {
-    try {
-        ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        console.log("✅ Gemini AI initialized successfully.");
-    } catch (e) {
-        console.warn("Failed to initialize Gemini:", e.message);
-    }
-} else {
-    console.warn("⚠️ GEMINI_API_KEY is missing in .env");
-}
 
 // Setup Multer for Image Uploads
 const storage = multer.diskStorage({
@@ -94,31 +79,69 @@ router.post('/chat', async (req, res) => {
         // 3. Save user message securely
         db.run(`INSERT INTO chats (user_id, message, is_bot_reply) VALUES (?, ?, 0)`, [activeUserId, message]);
 
-        if (!ai) {
-            const noKeyReply = "⚠️ AI is not configured. Please create a `.env` file in `kisaan-backend` and add your `GEMINI_API_KEY` to enable Kisaan Mitra AI.";
-            db.run(`INSERT INTO chats (user_id, message, is_bot_reply) VALUES (?, ?, 1)`, [activeUserId, noKeyReply]);
-            return res.json({ reply: noKeyReply, points_earned: 0 });
+        // Fetch last 5 messages for context
+        const chatHistory = await new Promise((resolve, reject) => {
+            db.all(
+                `SELECT message, is_bot_reply FROM chats WHERE user_id = ? ORDER BY timestamp DESC LIMIT 5`,
+                [activeUserId],
+                (err, rows) => {
+                    if (err) resolve([]);
+                    else resolve(rows.reverse()); // Reverse to get chronological order for context
+                }
+            );
+        });
+
+        const messages = [
+            {
+                role: 'system',
+                content: `You are Kisaan Mitra AI, a helpful, friendly, and highly knowledgeable agricultural expert and assistant for Indian farmers. Always reply in a concise, action-oriented, and easy-to-understand manner. IMPORTANT: The user prefers the language code/name: "${langPref}". Please respond in that language.`
+            }
+        ];
+
+        // Format historical context into prompt
+        for (const msg of chatHistory) {
+            // We ignore the very latest message from history because it corresponds to the current one that was just inserted 
+            // OR if there's any duplicate just to be safe. We'll simply append the user message explicitly afterwards.
+            if (msg.message !== message && msg.is_bot_reply !== undefined) {
+                messages.push({
+                    role: msg.is_bot_reply ? 'assistant' : 'user',
+                    content: msg.message
+                });
+            }
         }
 
-        // Call our live Gemini AI logic 
-        // (Note: I've retained the Gemini LIVE logic we just built rather than the old keywords logic, 
-        //  since it works flawlessly with the system we just wired together!)
-        const prompt = `You are Kisaan Mitra AI, a helpful, friendly, and highly knowledgeable agricultural expert and assistant for Indian farmers. 
-        Always reply in a concise, action-oriented, and easy-to-understand manner.
-        IMPORTANT: The user prefers the language code/name: "${langPref}". Please respond in that language.
-        
-        Farmer's query: "${message}"`;
-
-        const result = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: prompt,
-        });
+        // Append current message
+        messages.push({ role: 'user', content: message });
 
         let botReply = "I'm sorry, I couldn't process your request.";
 
-        if (result?.candidates?.length > 0) {
-            botReply = result.candidates[0].content.parts[0].text;
+        try {
+            const response = await fetch('http://localhost:11434/api/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'llama3',
+                    messages: messages,
+                    stream: false
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Ollama HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            if (data && data.message && data.message.content) {
+                botReply = data.message.content;
+            }
+        } catch (err) {
+            console.error('Ollama Local AI Error:', err.message);
+            const ollamaHelpMsg = "⚠️ Local AI (Ollama) is not running or the model is missing. Please start Ollama and ensure the 'llama3' model is installed to use Kisaan Mitra AI offline.";
+            // Still log their message and the failed bot message
+            db.run(`INSERT INTO chats (user_id, message, is_bot_reply) VALUES (?, ?, 1)`, [activeUserId, ollamaHelpMsg]);
+            return res.status(503).json({ error: ollamaHelpMsg });
         }
+
         // Save bot reply
         db.run(`INSERT INTO chats (user_id, message, is_bot_reply) VALUES (?, ?, 1)`, [activeUserId, botReply]);
 
@@ -139,13 +162,8 @@ router.post('/chat', async (req, res) => {
 
         res.json({ reply: botReply, points_earned: pointsEarned });
     } catch (error) {
-        console.error('Gemini API Error:', error);
-        // Extract inner error message if present
-        let errMsg = error.message;
-        if (error.status === 400 && errMsg.includes('API key not valid')) {
-            errMsg = 'API key not valid. Please pass a valid API key.';
-        }
-        res.status(500).json({ error: errMsg || 'Failed to generate AI response.' });
+        console.error('Chat Endpoint Error:', error);
+        res.status(500).json({ error: error.message || 'Failed to generate AI response.' });
     }
 });
 
@@ -181,61 +199,69 @@ router.post('/upload-image', upload.single('image'), async (req, res) => {
             });
         }
 
-        if (!ai) {
-            const noKeyData = {
-                diseasePredicted: "Error: AI Not Configured",
-                confidence: "0%",
-                treatment: "⚠️ Please create a `.env` file in `kisaan-backend` and add your `GEMINI_API_KEY` to enable image scanning."
-            };
-            db.run(`INSERT INTO scans (user_id, image_url, disease_predicted, confidence, treatment) VALUES (?, ?, ?, ?, ?)`,
-                [activeUserId, imageUrl, noKeyData.diseasePredicted, noKeyData.confidence, noKeyData.treatment]
-            );
-            return res.json({
-                ...noKeyData,
-                imageUrl,
-                points_earned: 0
-            });
-        }
-
-        // Instead of using ai.files.upload (which causes 500 internals on some SDK/file pairs)
-        // We will read the local image file directly to base64 and use inlineData
-        let mimeType = req.file.mimetype;
-        if (!mimeType || mimeType === 'application/octet-stream') {
-            // Default fallback if multer cannot determine the mime type correctly 
-            // from some mobile browsers. 
-            mimeType = 'image/jpeg';
-        }
-
         const fileBytes = fs.readFileSync(imageUrl);
         const base64Data = fileBytes.toString("base64");
 
         const prompt = `You are Kisaan Mitra AI, a master agronomist. 
-        Analyze the uploaded image of this crop/plant. 
-        Identify any visible diseases, pests, deficiencies, or state exactly what the crop is if healthy.
-        Provide your response in JSON format exactly like this:
-        {
-           "diseasePredicted": "Name of disease/pest OR 'Healthy Crop'",
-           "confidence": "percentage string like '95%'",
-           "treatment": "Provide a practical, step-by-step treatment or maintenance advice for a farmer."
-        }`;
+Analyze the uploaded image of this crop/plant. 
+Identify any visible diseases, pests, deficiencies, or state exactly what the crop is if healthy.
+Provide your response in JSON format exactly like this:
+{
+   "diseasePredicted": "Name of disease/pest OR 'Healthy Crop'",
+   "confidence": "percentage string like '95%'",
+   "treatment": "Provide a practical, step-by-step treatment or maintenance advice for a farmer."
+}`;
 
-        const response = await ai.models.generateContent({
-            model: 'gemini-2.5-flash',
-            contents: [
-                {
-                    inlineData: {
-                        mimeType: mimeType,
-                        data: base64Data
-                    }
-                },
-                prompt
-            ]
-        });
+        let parsedData = {
+            diseasePredicted: "Analysis Failed",
+            confidence: "0%",
+            treatment: "Could not process image."
+        };
 
-        // Parse Gemini JSON
-        let textResult = response.text;
-        textResult = textResult.replace(/```json/g, '').replace(/```/g, ''); // Clean markdown formatting
-        const parsedData = JSON.parse(textResult);
+        try {
+            const response = await fetch('http://localhost:11434/api/generate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: 'llava',
+                    prompt: prompt,
+                    images: [base64Data],
+                    stream: false,
+                    format: 'json'
+                })
+            });
+
+            if (!response.ok) {
+                throw new Error(`Ollama HTTP error! status: ${response.status}`);
+            }
+
+            const data = await response.json();
+            if (data && data.response) {
+                let textResult = data.response;
+                textResult = textResult.replace(/```json/g, '').replace(/```/g, ''); // Clean markdown formatting
+                try {
+                    parsedData = JSON.parse(textResult);
+                } catch (e) {
+                    parsedData.treatment = textResult; // fallback if JSON.parse fails
+                    parsedData.diseasePredicted = "Analysis Completed (Raw)";
+                }
+            }
+        } catch (err) {
+            console.error('Ollama Image Scan Error:', err.message);
+            const ollamaHelpMsg = "⚠️ Local Vision AI (Ollama llava) is not running or the model is missing. Please start Ollama and ensure the 'llava' model is installed to use offline image scanning.";
+            parsedData.treatment = ollamaHelpMsg;
+            db.run(`INSERT INTO scans (user_id, image_url, disease_predicted, confidence, treatment) VALUES (?, ?, ?, ?, ?)`,
+                [activeUserId, imageUrl, parsedData.diseasePredicted, parsedData.confidence, parsedData.treatment]
+            );
+            return res.status(503).json({
+                error: ollamaHelpMsg,
+                diseasePredicted: parsedData.diseasePredicted,
+                confidence: parsedData.confidence,
+                treatment: parsedData.treatment,
+                imageUrl,
+                points_earned: 0
+            });
+        }
 
         const todayStr = new Date().toISOString().split('T')[0];
         let pointsEarned = 0;
@@ -268,12 +294,8 @@ router.post('/upload-image', upload.single('image'), async (req, res) => {
         });
 
     } catch (error) {
-        console.error('Gemini Image Scan Error:', error);
-        let errMsg = error.message;
-        if (error.status === 400 && errMsg.includes('API key not valid')) {
-            errMsg = 'API key not valid. Please pass a valid API key.';
-        }
-        res.status(500).json({ error: errMsg || 'Failed to process image scan.' });
+        console.error('Image Scan Endpoint Error:', error);
+        res.status(500).json({ error: error.message || 'Failed to process image scan.' });
     }
 });
 
