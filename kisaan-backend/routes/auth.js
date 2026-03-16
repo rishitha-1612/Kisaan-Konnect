@@ -1,83 +1,107 @@
-const express = require('express');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-const db = require('../db');
+const express = require("express");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+
+const User = require("../models/User");
+
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || 'secret_kisaan_key';
 
-router.post('/signup', async (req, res) => {
+
+router.post("/signup", async (req, res) => {
+
+  try {
+
     const { name, email, phone, password } = req.body;
 
-    if (!name || !email || !phone || !password) {
-        return res.status(400).json({ error: 'All fields are required.' });
+    const existing = await User.findOne({
+      $or: [{ email }, { phone }]
+    });
+
+    if (existing) {
+      return res.status(400).json({
+        error: "User already exists"
+      });
     }
 
-    try {
-        const hashedPassword = await bcrypt.hash(password, 10);
+    const hashed = await bcrypt.hash(password, 10);
 
-        db.run(
-            `INSERT INTO users (name, email, phone, password, points, language, location, crop_type, soil_type) VALUES (?, ?, ?, ?, 10, 'en', '', '', '')`,
-            [name, email, phone, hashedPassword],
-            function (err) {
-                if (err) {
-                    if (err.message.includes('UNIQUE constraint failed')) {
-                        return res.status(400).json({ error: 'User with this email or phone already exists.' });
-                    }
-                    return res.status(500).json({ error: 'Database error: ' + err.message });
-                }
+    const user = await User.create({
+      name,
+      email,
+      phone,
+      password: hashed
+    });
 
-                const user_id = this.lastID;
-                const token = jwt.sign({ id: user_id }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
+    );
 
-                res.json({
-                    message: 'Signup successful',
-                    token,
-                    user: { id: user_id, name, email, phone, points: 10 }
-                });
-            }
-        );
-    } catch (error) {
-        res.status(500).json({ error: 'Server error' });
-    }
+    res.json({
+      token,
+      user
+    });
+
+  } catch (error) {
+
+    res.status(500).json({
+      error: "Signup failed"
+    });
+
+  }
+
 });
 
-router.post('/login', (req, res) => {
-    const { identifier, password } = req.body; // identifier can be email or phone
 
-    if (!identifier || !password) {
-        return res.status(400).json({ error: 'Identifier and password are required.' });
+
+router.post("/login", async (req, res) => {
+
+  try {
+
+    const { identifier, password } = req.body;
+
+    const user = await User.findOne({
+      $or: [
+        { email: identifier },
+        { phone: identifier }
+      ]
+    });
+
+    if (!user) {
+      return res.status(400).json({
+        error: "User not found"
+      });
     }
 
-    db.get(
-        `SELECT * FROM users WHERE email = ? OR phone = ?`,
-        [identifier, identifier],
-        async (err, user) => {
-            if (err) return res.status(500).json({ error: 'Database error' });
-            if (!user) return res.status(400).json({ error: 'Invalid credentials.' });
-            if (!user.password) return res.status(400).json({ error: 'No password set for this user.' });
+    const match = await bcrypt.compare(password, user.password);
 
-            const isMatch = await bcrypt.compare(password, user.password);
-            if (!isMatch) return res.status(400).json({ error: 'Invalid credentials.' });
+    if (!match) {
+      return res.status(400).json({
+        error: "Incorrect password"
+      });
+    }
 
-            const token = jwt.sign({ id: user.id }, JWT_SECRET, { expiresIn: '7d' });
-
-            res.json({
-                message: 'Login successful',
-                token,
-                user: {
-                    id: user.id,
-                    name: user.name,
-                    email: user.email,
-                    phone: user.phone,
-                    location: user.location,
-                    crop: user.crop_type,
-                    language: user.language,
-                    points: user.points
-                }
-            });
-        }
+    const token = jwt.sign(
+      { id: user._id },
+      process.env.JWT_SECRET,
+      { expiresIn: "7d" }
     );
+
+    res.json({
+      token,
+      user
+    });
+
+  } catch (error) {
+
+    res.status(500).json({
+      error: "Login failed"
+    });
+
+  }
+
 });
 
 module.exports = router;

@@ -1,41 +1,56 @@
-const express = require('express');
-const db = require('../db');
+const express = require("express");
+const User = require("../models/User");
+
 const router = express.Router();
 
-router.post('/onboarding', (req, res) => {
-    const { userId, crop, location } = req.body;
 
-    if (!userId || !crop || !location) {
-        return res.status(400).json({ error: 'Missing required fields.' });
+
+router.get("/:id", async (req, res) => {
+
+  try {
+
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({
+        error: "User not found"
+      });
     }
 
-    db.run(
-        `UPDATE users SET crop_type = ?, location = ? WHERE id = ?`,
-        [crop, location, userId],
-        function (err) {
-            if (err) return res.status(500).json({ error: 'Database error updating user.' });
+    res.json(user);
 
-            // Return updated user data (mocked slightly based on what we sent)
-            res.json({ message: 'Onboarding completed', user: { crop, location } });
-        }
-    );
+  } catch (error) {
+
+    res.status(500).json({
+      error: "Failed to fetch user"
+    });
+
+  }
+
 });
 
-router.put('/language', (req, res) => {
-    const { userId, language } = req.body;
 
-    if (!userId || !language) {
-        return res.status(400).json({ error: 'Missing requried fields.' });
-    }
 
-    db.run(
-        `UPDATE users SET language = ? WHERE id = ?`,
-        [language, userId],
-        function (err) {
-            if (err) return res.status(500).json({ error: 'Database error updating language.' });
-            res.json({ message: 'Language updated', language });
-        }
+router.put("/:id", async (req, res) => {
+
+  try {
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      req.body,
+      { new: true }
     );
+
+    res.json(user);
+
+  } catch (error) {
+
+    res.status(500).json({
+      error: "Failed to update user"
+    });
+
+  }
+
 });
 
 module.exports = router;
