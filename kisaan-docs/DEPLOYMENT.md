@@ -1,4 +1,13 @@
 # Deployment Instructions
+these are the google colab notebooks -
+first download the models from the notebooks after running and place them in the folder 
+
+1. plant disease detection CNN model - https://colab.research.google.com/drive/1HZhy9hpjjTekp_tJZSvAP8LuXjybW3uE?usp=sharing
+first download the models from the notebooks after running and place them in the folder
+sih\kisaan-backend\ai_models\disease
+
+2. crop adviory ML model - https://colab.research.google.com/drive/1uddMJdJeJOp1PT4kYPD_UMZA_9LOaQg4?usp=sharing
+do the same and place them in - sih\kisaan-backend\ai_models\advisory\models
 
 ## Running Locally (for Hackathon Demo)
 1. create a virtual environment - 
