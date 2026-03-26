@@ -40,7 +40,6 @@ lerna-debug.log*
 *.bin
 *.gguf
 
-
 # Upload folders
 uploads/
 
